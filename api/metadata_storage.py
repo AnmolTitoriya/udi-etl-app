@@ -105,8 +105,9 @@ async def list_connections(user_id: str | None = None) -> list[dict]:
         out = []
         for r in results:
             config = json.loads(r[4])
-            if "password" in config:
-                config["password"] = "****"
+            for secret_field in ("password", "secret_key", "session_token"):
+                if secret_field in config:
+                    config[secret_field] = "****"
             out.append({
                 "id": r[0],
                 "name": r[1],
