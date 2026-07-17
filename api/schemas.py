@@ -71,6 +71,14 @@ class ConnectionCreate(BaseModel):
     checkpoint_file: str | None = None
     pool_timeout: float = 30.0
 
+    region: str | None = None
+    catalog: str | None = None
+    workgroup: str | None = None
+    output_location: str | None = None
+    access_key: str | None = None
+    secret_key: str | None = None
+    session_token: str | None = None
+
 
 class ConnectionResponse(BaseModel):
     id: str

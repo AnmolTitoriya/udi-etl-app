@@ -87,6 +87,22 @@ Save your database details so you don't have to send them every time. The API co
 }
 ```
 
+**Minimal for Athena:**
+```json
+{
+  "name": "My Athena",
+  "source_type": "athena",
+  "database": "analytics",
+  "workgroup": "primary",
+  "output_location": "s3://my-athena-results/",
+  "region": "us-east-1"
+}
+```
+
+Credentials for Athena (`access_key`/`secret_key`/`session_token`) are optional
+— omit them to fall back to the default boto3 credential chain (IAM role, env
+vars, `~/.aws/credentials`).
+
 All optional fields you can include:
 
 | Field | For source | Default |
@@ -99,7 +115,7 @@ All optional fields you can include:
 | `pool_max_size` | postgresql | 10 |
 | `pool_timeout` | postgresql | 30.0 |
 | `batch_size` | all | 20000 |
-| `incremental_column` | postgresql, sql | null |
+| `incremental_column` | postgresql, sql, athena | null |
 | `incremental_field` | mongodb | null |
 | `cursor_name` | postgresql | null |
 | `checkpoint_file` | all | null |
@@ -112,6 +128,11 @@ All optional fields you can include:
 | `recursive` | file_upload | false |
 | `include_content` | file_upload | false |
 | `files` | file_upload | null |
+| `region` | athena | `"us-east-1"` |
+| `catalog` | athena | `"AwsDataCatalog"` |
+| `workgroup` | athena | `"primary"` |
+| `output_location` | athena | null (required unless the workgroup has a default) |
+| `access_key` / `secret_key` / `session_token` | athena | null (falls back to boto3 default credential chain) |
 
 **Response:** `{ "id": "abc-123", "name": "...", "source_type": "...", "config": {...}, "created_at": "..." }`
 

@@ -44,6 +44,11 @@ def _build_config(req: ConnectionCreate) -> dict:
             "input_dir", "file_pattern", "recursive", "include_content", "files",
             "batch_size", "checkpoint_file",
         },
+        "athena": {
+            "database", "region", "catalog", "workgroup", "output_location",
+            "access_key", "secret_key", "session_token",
+            "batch_size", "incremental_column", "checkpoint_file",
+        },
     }
     allowed = source_fields.get(req.source_type, set())
     config = {}
