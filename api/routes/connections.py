@@ -2,7 +2,7 @@ import logging
 
 from fastapi import APIRouter, Header, HTTPException
 
-from udi_connectors import RuleTransform, SqlTransform, create_source, list_targets, migrate_all
+from udi_connectors import RuleTransform, SqlTransform, create_source, get_source_class, list_targets, migrate_all
 
 from ..auth import decode_token
 from ..metadata_storage import get_connection, list_connections, save_connection
@@ -28,35 +28,32 @@ router = APIRouter(prefix="/connections", tags=["connections"])
 
 
 def _build_config(req: ConnectionCreate) -> dict:
-    source_fields = {
-        "postgresql": {
-            "host", "port", "database", "username", "password",
-            "ssl_mode", "ssl_cert", "ssl_key", "ssl_root_cert",
-            "pool_min_size", "pool_max_size", "pool_timeout",
-            "batch_size", "incremental_column", "cursor_name", "checkpoint_file",
-        },
-        "mongodb": {
-            "connection_string", "database", "max_pool_size",
-            "batch_size", "incremental_field", "checkpoint_file",
-        },
-        "sql": {
-            "host", "port", "database", "username", "password",
-            "dialect", "driver", "extra_params", "pool_size", "max_overflow",
-            "batch_size", "incremental_column", "checkpoint_file",
-        },
-        "file_upload": {
-            "input_dir", "file_pattern", "recursive", "include_content", "files",
-            "batch_size", "checkpoint_file",
-        },
-        "athena": {
-            "database", "region", "catalog", "workgroup", "output_location",
-            "access_key", "secret_key", "session_token",
-            "batch_size", "incremental_column", "checkpoint_file",
-        },
-    }
-    allowed = source_fields.get(req.source_type, set())
-    config = {}
-    for f in allowed:
+    """Resolve the config kwargs to hand to create_source(), driven by the
+    connector's own registered Config class rather than a hardcoded per-type
+    whitelist — so any registered source (built-in or a custom/plugin
+    connector) works here without a code change. Values can come from
+    ConnectionCreate's named fields (the common ones, with curated frontend
+    inputs) or from extra_config (anything else the Config class declares —
+    what a custom connector's dynamic form fills in).
+
+    extra_config is applied first, then any *explicitly set* named field
+    overrides it — model_fields_set (not "is not None") is what tells a
+    field the client actually sent apart from one just sitting at its
+    pydantic default, e.g. batch_size: int = 20_000 is present on every
+    request whether or not the client mentioned it, and must not clobber a
+    real extra_config value with that default.
+    """
+    connector_cls = get_source_class(req.source_type)
+    if connector_cls is None:
+        return dict(req.extra_config)
+
+    allowed = set(connector_cls.Config.model_fields.keys()) - {"source_type", "target_type", "last_checkpoint"}
+
+    config: dict = {}
+    for f, val in req.extra_config.items():
+        if f in allowed and val is not None:
+            config[f] = val
+    for f in allowed & req.model_fields_set:
         val = getattr(req, f, None)
         if val is not None:
             config[f] = val

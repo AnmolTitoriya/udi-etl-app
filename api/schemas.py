@@ -38,6 +38,14 @@ class ConnectionCreate(BaseModel):
     source_type: str
     description: str = ""
 
+    # Passthrough for any config field a connector's Config class declares
+    # that isn't already named below — e.g. a custom connector's fields, or
+    # a built-in field that predates a given frontend build. A named field
+    # below only overrides this for the same key if the client explicitly
+    # set it (see _build_config in routes/connections.py) — its bare
+    # pydantic default never overrides an extra_config value.
+    extra_config: dict[str, Any] = Field(default_factory=dict)
+
     host: str | None = None
     port: int | None = None
     database: str | None = None

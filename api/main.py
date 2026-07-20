@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from udi_connectors import list_sources, list_targets
 
+from .connector_schema import describe_source, describe_target
 from .metadata_storage import init_db
 from .routes.auth import router as auth_router
 from .routes.connections import router as connections_router
@@ -77,6 +78,25 @@ async def sources():
 @app.get("/targets", response_model=TargetsResponse)
 async def targets():
     return TargetsResponse(targets=list_targets())
+
+
+@app.get("/sources/{name}/schema")
+async def source_schema(name: str):
+    """Field descriptors for a source's Config class — how the wizard builds
+    a form for any connector it doesn't have a hand-authored field spec for,
+    built-in or custom/plugin alike."""
+    fields = describe_source(name)
+    if fields is None:
+        raise HTTPException(status_code=404, detail=f"Unknown source: {name}")
+    return {"source_type": name, "fields": fields}
+
+
+@app.get("/targets/{name}/schema")
+async def target_schema(name: str):
+    fields = describe_target(name)
+    if fields is None:
+        raise HTTPException(status_code=404, detail=f"Unknown target: {name}")
+    return {"target_type": name, "fields": fields}
 
 
 @app.post("/migrate", response_model=MigrationResponse, status_code=202)
