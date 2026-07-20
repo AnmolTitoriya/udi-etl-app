@@ -2,7 +2,7 @@ import logging
 
 from fastapi import APIRouter, Header, HTTPException
 
-from udi_connectors import create_source, list_targets, migrate_all
+from udi_connectors import RuleTransform, SqlTransform, create_source, list_targets, migrate_all
 
 from ..auth import decode_token
 from ..metadata_storage import get_connection, list_connections, save_connection
@@ -14,9 +14,13 @@ from ..schemas import (
     ConnectionTestResponse,
     DatabaseListResponse,
     MigrationResponse,
+    PublishRequest,
+    QueryRequest,
+    QueryResponse,
     TableListResponse,
+    TransformRequest,
 )
-from ..tasks import run_migration
+from ..tasks import run_migration, run_publish, run_transform
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +154,32 @@ async def get_databases(conn_id: str):
         await connector.disconnect()
 
 
+@router.post("/{conn_id}/query", response_model=QueryResponse)
+async def run_query(conn_id: str, req: QueryRequest, authorization: str = Header(None)):
+    user_id = _get_user_id(authorization)
+    logger.info("POST /connections/%s/query user=%s", conn_id[:8], user_id[:8])
+    record = await get_connection(conn_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Connection not found")
+
+    source_type = record["source_type"]
+    if source_type != "athena":
+        raise HTTPException(status_code=400, detail=f"Ad-hoc queries are not supported for source type '{source_type}'")
+
+    config = record["config"]
+    connector, cfg = create_source(source_type, **config)
+    try:
+        await connector.connect(cfg)
+        result = await connector.execute_query(req.sql)
+        return QueryResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Query failed: {e}")
+    finally:
+        await connector.disconnect()
+
+
 @router.post("/{conn_id}/migrate", response_model=MigrationResponse, status_code=202)
 async def migrate_from_connection(conn_id: str, req: ConnectionMigrateRequest):
     logger.info("POST /connections/%s/migrate: tables=%s", conn_id[:8], req.tables)
@@ -161,12 +191,18 @@ async def migrate_from_connection(conn_id: str, req: ConnectionMigrateRequest):
     source_config = record["config"]
     connection_name = record.get("name")
 
+    # Stage 2/3 read the raw zone by connection_id + table_name, so the S3
+    # target needs to know which connection this landing belongs to. A
+    # caller-supplied connection_id in target_config (if any) wins.
+    target_config = dict(req.target_config)
+    target_config.setdefault("connection_id", conn_id)
+
     task_id = await run_migration(
         source=source_type,
         target="s3",
         tables=req.tables,
         source_config=source_config,
-        target_config=req.target_config,
+        target_config=target_config,
         connection_id=conn_id,
         connection_name=connection_name,
     )
@@ -174,4 +210,73 @@ async def migrate_from_connection(conn_id: str, req: ConnectionMigrateRequest):
         task_id=task_id,
         status="running",
         message="Migration started",
+    )
+
+
+@router.post("/{conn_id}/transform", response_model=MigrationResponse, status_code=202)
+async def transform_connection(conn_id: str, req: TransformRequest):
+    """Stage 2: read the raw zone this connection already landed (Athena SQL,
+    or the direct S3 reader as a fallback), transform it, land the result in
+    curated/{connection}/{table}__staging/."""
+    logger.info("POST /connections/%s/transform: table=%s source_type=%s", conn_id[:8], req.table_name, req.source_type)
+    record = await get_connection(conn_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    connection_name = record.get("name")
+
+    if req.sql:
+        transform = SqlTransform(sql=req.sql)
+        persist = {"type": "sql", "sql": req.sql}
+    elif req.rule:
+        transform = RuleTransform(
+            rename=req.rule.rename,
+            cast=req.rule.cast,
+            drop_columns=req.rule.drop_columns,
+            drop_nulls=req.rule.drop_nulls,
+            dedupe_keys=req.rule.dedupe_keys,
+        )
+        persist = {"type": "rule", **req.rule.model_dump()}
+    else:
+        transform = None
+        persist = {"type": "none"}
+
+    task_id = await run_transform(
+        connection_id=conn_id,
+        table_name=req.table_name,
+        transform=transform,
+        source_type=req.source_type,
+        source_config=req.source_config,
+        target_config=req.target_config,
+        batch_size=req.batch_size,
+        connection_name=connection_name,
+        persist_transform=persist,
+    )
+    return MigrationResponse(
+        task_id=task_id,
+        status="running",
+        message="Transform started",
+    )
+
+
+@router.post("/{conn_id}/publish", response_model=MigrationResponse, status_code=202)
+async def publish_connection(conn_id: str, req: PublishRequest):
+    """Stage 3: check whether the published curated dataset already exists,
+    then create / append / upsert Stage 2's staged increment into it."""
+    logger.info("POST /connections/%s/publish: table=%s merge_keys=%s", conn_id[:8], req.table_name, req.merge_keys)
+    record = await get_connection(conn_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    connection_name = record.get("name")
+
+    task_id = await run_publish(
+        connection_id=conn_id,
+        table_name=req.table_name,
+        merge_keys=req.merge_keys,
+        target_config=req.target_config,
+        connection_name=connection_name,
+    )
+    return MigrationResponse(
+        task_id=task_id,
+        status="running",
+        message="Publish started",
     )

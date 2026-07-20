@@ -27,8 +27,10 @@ class LoadResultSchema(BaseModel):
 class TaskStatusResponse(BaseModel):
     task_id: str
     status: str
+    stage: str = "landed"
     result: list[LoadResultSchema] | None = None
     error: str | None = None
+    detail: dict[str, Any] | None = None
 
 
 class ConnectionCreate(BaseModel):
@@ -109,6 +111,49 @@ class DatabaseListResponse(BaseModel):
 class ConnectionMigrateRequest(BaseModel):
     tables: list[str]
     target_config: dict
+
+
+class TransformRuleConfig(BaseModel):
+    rename: dict[str, str] = Field(default_factory=dict)
+    cast: dict[str, str] = Field(default_factory=dict)
+    drop_columns: list[str] = Field(default_factory=list)
+    drop_nulls: list[str] = Field(default_factory=list)
+    dedupe_keys: list[str] | None = None
+
+
+class TransformRequest(BaseModel):
+    table_name: str
+    sql: str | None = Field(default=None, description="Manual transform: SQL run against Athena over the raw zone")
+    rule: TransformRuleConfig | None = Field(default=None, description="Automatic transform: declarative column rules, works with either reader")
+    source_type: str = Field(default="athena", description="'athena' (required for sql transforms) or 's3' (direct reader fallback)")
+    source_config: dict[str, Any] = Field(default_factory=dict)
+    target_config: dict[str, Any] = Field(default_factory=dict)
+    batch_size: int | None = None
+
+
+class PublishRequest(BaseModel):
+    table_name: str
+    merge_keys: list[str] | None = Field(default=None, description="Row key(s) to upsert on; omit for a plain append")
+    target_config: dict[str, Any] = Field(default_factory=dict)
+
+
+class PublishResultSchema(BaseModel):
+    table_name: str
+    action: str
+    schema_changed: bool
+    rows_loaded: int
+    batch_count: int
+    errors: list[str]
+
+
+class QueryRequest(BaseModel):
+    sql: str = Field(description="SQL query text to execute against the connection's source")
+
+
+class QueryResponse(BaseModel):
+    columns: list[str]
+    rows: list[list[Any]]
+    row_count: int
 
 
 class UserCreate(BaseModel):

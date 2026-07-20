@@ -118,6 +118,8 @@ async def get_migration_status(task_id: str):
     return TaskStatusResponse(
         task_id=task_id,
         status=task.status,
+        stage=task.stage,
         result=result,
         error=task.error,
+        detail=task.detail,
     )

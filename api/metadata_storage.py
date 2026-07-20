@@ -41,6 +41,12 @@ async def init_db():
             ALTER TABLE connections ADD COLUMN IF NOT EXISTS description TEXT DEFAULT ''
         """)
         await conn.execute("""
+            ALTER TABLE connections ADD COLUMN IF NOT EXISTS transform_config TEXT
+        """)
+        await conn.execute("""
+            ALTER TABLE connections ADD COLUMN IF NOT EXISTS merge_keys TEXT NOT NULL DEFAULT '[]'
+        """)
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS migrations (
                 id TEXT PRIMARY KEY,
                 connection_id TEXT,
@@ -54,6 +60,13 @@ async def init_db():
                 s3_folder TEXT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
+        """)
+        # Stage of the pipeline this row represents: landed (Stage 1, the
+        # existing default) / transformed (Stage 2) / published (Stage 3).
+        # `status` continues to mean running/completed/failed *within* that
+        # stage, same as before — this only adds which stage it's for.
+        await conn.execute("""
+            ALTER TABLE migrations ADD COLUMN IF NOT EXISTS stage TEXT NOT NULL DEFAULT 'landed'
         """)
         await conn.commit()
 
@@ -128,25 +141,38 @@ async def save_migration(
     source_type: str,
     target_type: str,
     tables: list[str],
+    stage: str = "landed",
 ) -> None:
     conn = await psycopg.AsyncConnection.connect(DATABASE_URL)
     try:
         await conn.execute(
-            "INSERT INTO migrations (id, connection_id, connection_name, source_type, target_type, tables, status, s3_folder) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-            (task_id, connection_id, connection_name, source_type, target_type, json.dumps(tables), "running", task_id),
+            "INSERT INTO migrations (id, connection_id, connection_name, source_type, target_type, tables, status, s3_folder, stage) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (task_id, connection_id, connection_name, source_type, target_type, json.dumps(tables), "running", task_id, stage),
         )
         await conn.commit()
     finally:
         await conn.close()
 
 
-async def update_migration(task_id: str, status: str, result: str | None = None, error: str | None = None) -> None:
+async def update_migration(
+    task_id: str,
+    status: str,
+    result: str | None = None,
+    error: str | None = None,
+    stage: str | None = None,
+) -> None:
     conn = await psycopg.AsyncConnection.connect(DATABASE_URL)
     try:
-        await conn.execute(
-            "UPDATE migrations SET status = %s, result = %s, error = %s WHERE id = %s",
-            (status, result, error, task_id),
-        )
+        if stage is not None:
+            await conn.execute(
+                "UPDATE migrations SET status = %s, result = %s, error = %s, stage = %s WHERE id = %s",
+                (status, result, error, stage, task_id),
+            )
+        else:
+            await conn.execute(
+                "UPDATE migrations SET status = %s, result = %s, error = %s WHERE id = %s",
+                (status, result, error, task_id),
+            )
         await conn.commit()
     finally:
         await conn.close()
@@ -156,7 +182,7 @@ async def get_connection(conn_id: str) -> dict | None:
     conn = await psycopg.AsyncConnection.connect(DATABASE_URL)
     try:
         rows = await conn.execute(
-            "SELECT id, name, description, source_type, config, created_at FROM connections WHERE id = %s",
+            "SELECT id, name, description, source_type, config, created_at, transform_config, merge_keys FROM connections WHERE id = %s",
             (conn_id,),
         )
         r = await rows.fetchone()
@@ -170,7 +196,41 @@ async def get_connection(conn_id: str) -> dict | None:
             "source_type": r[3],
             "config": config,
             "created_at": r[5].isoformat() if r[5] else None,
+            "transform_config": json.loads(r[6]) if r[6] else None,
+            "merge_keys": json.loads(r[7]) if r[7] else [],
         }
+    finally:
+        await conn.close()
+
+
+async def save_transform_config(conn_id: str, transform_config: dict, merge_keys: list[str] | None = None) -> None:
+    conn = await psycopg.AsyncConnection.connect(DATABASE_URL)
+    try:
+        if merge_keys is not None:
+            await conn.execute(
+                "UPDATE connections SET transform_config = %s, merge_keys = %s WHERE id = %s",
+                (json.dumps(transform_config), json.dumps(merge_keys), conn_id),
+            )
+        else:
+            await conn.execute(
+                "UPDATE connections SET transform_config = %s WHERE id = %s",
+                (json.dumps(transform_config), conn_id),
+            )
+        await conn.commit()
+        logger.info("Saved transform config for connection=%s", conn_id[:8])
+    finally:
+        await conn.close()
+
+
+async def save_merge_keys(conn_id: str, merge_keys: list[str]) -> None:
+    conn = await psycopg.AsyncConnection.connect(DATABASE_URL)
+    try:
+        await conn.execute(
+            "UPDATE connections SET merge_keys = %s WHERE id = %s",
+            (json.dumps(merge_keys), conn_id),
+        )
+        await conn.commit()
+        logger.info("Saved merge keys for connection=%s: %s", conn_id[:8], merge_keys)
     finally:
         await conn.close()
 
