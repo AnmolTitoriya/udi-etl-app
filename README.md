@@ -18,7 +18,10 @@ uv run uvicorn api.main:app --reload --port 8001
 ```
 
 Open `http://localhost:8001/docs` for the interactive Swagger UI. See
-[`docs/USAGE.md`](docs/USAGE.md) for the full API reference.
+[`docs/USAGE.md`](docs/USAGE.md) for the full API reference, and
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how this service fits
+into the wider platform (client, gateway, core services, AWS mapping) and
+what's implemented versus planned.
 
 This assumes `udi-connectors` and `udi-packages` are checked out as sibling
 directories (`../udi-connectors`, `../udi-packages`), per the

@@ -21,18 +21,62 @@ Open `http://localhost:8001/docs` for the interactive Swagger UI.
 
 ## All endpoints
 
-| Method | URL | What it does |
-|--------|-----|-------------|
-| `GET` | `/health` | Check if server is alive |
-| `GET` | `/sources` | See what source types are available |
-| `GET` | `/targets` | See what target types are available |
-| `POST` | `/connections` | Save a database connection (tests it first) |
-| `GET` | `/connections` | List all saved connections |
-| `POST` | `/connections/{id}/databases` | List databases on that server |
-| `POST` | `/connections/{id}/tables` | List tables in that database |
-| `POST` | `/connections/{id}/migrate` | Migrate data from a saved connection to S3 |
-| `POST` | `/migrate` | Start a migration directly (no saved connection) |
-| `GET` | `/migrate/{task_id}` | Check migration status |
+| Method | URL | Auth required | What it does |
+|--------|-----|:---:|-------------|
+| `GET` | `/health` | | Check if server is alive |
+| `POST` | `/auth/signup` | | Create a user, returns a JWT |
+| `POST` | `/auth/login` | | Log in, returns a JWT |
+| `GET` | `/auth/me` | ✓ | Get the current user from the token |
+| `GET` | `/sources` | | See what source types are available |
+| `GET` | `/targets` | | See what target types are available |
+| `GET` | `/sources/{name}/schema` | | Field descriptors for a source's config (drives dynamic forms) |
+| `GET` | `/targets/{name}/schema` | | Field descriptors for a target's config |
+| `POST` | `/connections` | ✓ | Save a connection under the current user |
+| `POST` | `/connections/test` | ✓ | Test connection details without saving them |
+| `GET` | `/connections` | ✓ | List the current user's saved connections |
+| `POST` | `/connections/{id}/databases` | | List databases on that server |
+| `POST` | `/connections/{id}/tables` | | List tables in that database |
+| `POST` | `/connections/{id}/query` | ✓ | Run an ad-hoc SQL query (Athena connections only) |
+| `POST` | `/connections/{id}/migrate` | | Stage 1: migrate a saved connection's tables to S3 (raw zone) |
+| `POST` | `/migrate` | | Stage 1, ad-hoc: migrate directly, no saved connection |
+| `POST` | `/connections/{id}/transform` | | Stage 2: transform the raw zone into a curated staging increment |
+| `POST` | `/connections/{id}/publish` | | Stage 3: publish the staged increment into the curated dataset |
+| `GET` | `/migrate/{task_id}` | | Check status of any stage (migrate/transform/publish) by task id |
+
+Routes marked "Auth required" expect an `Authorization: Bearer <token>`
+header, using the token from `/auth/signup` or `/auth/login`. The
+listing/table/database/migrate/transform/publish routes that take a
+`{conn_id}` don't currently check the token against connection ownership —
+see [`ARCHITECTURE.md`](ARCHITECTURE.md) for the current state of the auth
+model.
+
+A demo user is seeded on first startup: `demo@example.com` / `demo123`.
+
+---
+
+## 0. Authentication
+
+**Sign up — POST /auth/signup**
+```json
+{ "email": "me@example.com", "password": "hunter2", "name": "Me" }
+```
+
+**Log in — POST /auth/login**
+```json
+{ "email": "me@example.com", "password": "hunter2" }
+```
+
+Both return:
+```json
+{
+  "access_token": "eyJ...",
+  "token_type": "bearer",
+  "user": { "id": "abc-123", "email": "me@example.com", "name": "Me" }
+}
+```
+
+Send `Authorization: Bearer <access_token>` on `POST /connections`,
+`POST /connections/test`, `GET /connections`, and `GET /auth/me`.
 
 ---
 
@@ -237,6 +281,69 @@ Same as #5 but you send the full source config inline. Works the same as before.
   }
 }
 ```
+
+---
+
+## 6a. Transform (Stage 2) — POST /connections/{id}/transform
+
+Reads back what Stage 1 landed in the S3 raw zone, optionally transforms
+it, and lands the result as an isolated `{table}__staging` increment under
+the curated zone. Two transform options, both optional (omit both to just
+copy raw → curated staging untouched):
+
+**SQL transform** (requires the connection's `source_type` to be
+`"athena"` — the SQL runs against Athena over the raw zone):
+```json
+{
+  "table_name": "orders",
+  "sql": "SELECT id, customer_id, total FROM orders WHERE total > 0"
+}
+```
+
+**Rule transform** (works against Athena or the plain S3 fallback reader):
+```json
+{
+  "table_name": "orders",
+  "rule": {
+    "rename": { "cust_id": "customer_id" },
+    "cast": { "total": "float64" },
+    "drop_columns": ["internal_notes"],
+    "drop_nulls": ["customer_id"],
+    "dedupe_keys": ["id"]
+  }
+}
+```
+
+`source_type` defaults to `"athena"`; pass `"s3"` to use the direct S3
+reader instead (required if a SQL transform isn't being used and Athena
+isn't provisioned for this connection). `source_config`/`target_config`
+override the connection's stored config for this run only.
+
+**Response:** `{ "task_id": "...", "status": "running", "message": "Transform started" }` — poll it the same way as a migration.
+
+---
+
+## 6b. Publish (Stage 3) — POST /connections/{id}/publish
+
+Moves Stage 2's staged increment into the published curated dataset.
+
+```json
+{
+  "table_name": "orders",
+  "merge_keys": ["id"]
+}
+```
+
+Omit `merge_keys` for a plain append. The connector checks whether the
+table already exists and picks **create** (first write), **append** (no
+merge keys), or **upsert** (delete-then-rewrite by `merge_keys`)
+accordingly, then clears the staging increment. A schema change between the
+previous and newly-published columns is logged as a warning but does not
+block the publish — the Glue table definition isn't auto-updated, so a
+crawler re-run (or manual `ALTER TABLE`) is needed before querying new
+columns via Athena.
+
+**Response:** `{ "task_id": "...", "status": "running", "message": "Publish started" }` — poll it the same way as a migration; the result shape is `PublishResultSchema` (`action`, `schema_changed`, `rows_loaded`, `batch_count`, `errors`).
 
 ---
 
